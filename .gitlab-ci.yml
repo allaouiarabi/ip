@@ -1,0 +1,87 @@
+image: 127.0.0.1:5000/php:7.4
+
+stages:
+  - test
+  - build_project
+  - deploy
+
+variables:
+  # Configure mysql service (https://hub.docker.com/_/mysql/)
+  HINTAPI: factory.hint.icade.fr
+  HINTROLE: frontend73
+  HINTDBROLE: pgdb
+  HINTFULLNAME: frontend73.ci.hint.icade.fr
+  HINTDBFULLNAME: pgdb.ci.hint.icade.fr
+  HINTDYNCONF: factory.hint.icade.fr/api/dynconfs
+  HINTSHORTNAME: frontend73.ci
+  HINTDOM: ci.hint.icade.fr
+  HINTENV: ci
+  HINTSUFFIX: hint.icade.fr
+  HINTDBSHORTNAME: pgdb.ci
+  DOCKER_TLS_CERTDIR: ''
+  PROJECT_FILES_TAR: ./project-files.tar
+
+test:
+  stage: test
+  image: node:15.6
+  before_script:
+    - "yarn install"
+  script:
+    - "yarn lint"
+  only:
+    - merge_requests
+    - develop
+
+.build_project:
+  stage: build_project
+  image: node:15.6
+  before_script:
+    - 'yarn install'
+  script:
+    - 'yarn generate'
+  after_script:
+    - "tar -czf $PROJECT_FILES_TAR ./dist"
+  artifacts:
+    name: $CI_COMMIT_SHORT_SHA
+    paths:
+      - $PROJECT_FILES_TAR
+    expire_in: 1 day
+  when: manual
+
+build:project:integ:
+  environment:
+    name: integ
+  extends: .build_project
+  when: on_success
+  except:
+    - merge_requests
+  only:
+    - develop
+
+build:project:prod:
+  environment:
+    name: prod
+  extends: .build_project
+
+.deploy:
+  stage: deploy
+  script:
+    - "mkdir -p ~/.ssh && chmod 600 ~/.ssh"
+    - "echo $CI_ENVIRONMENT_NAME && echo $CI_ENVIRONMENT_SLUG"
+    - "echo \"$HINT_SSH_PRIVATE_KEY\" > ~/.ssh/i2_rsa && chmod 600 ~/.ssh/i2_rsa"
+    - "ssh-keyscan -t rsa $HINT_SSH_HOST 2>&1 >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts"
+    - "ls -la"
+    - "echo 'ssh' && ssh -i ~/.ssh/i2_rsa $HINT_SSH_USER@$HINT_SSH_HOST \"source /etc/profile && export no_proxy=\"$no_proxy,gitlab.icade.fr\" && echo \"cd rip-nuxt\" && cd rip-nuxt && hintdeploy rip-nuxt init && hintdeploy rip-nuxt pull\""
+    - "echo 'sftp' && echo -e \"put $PROJECT_FILES_TAR rip-nuxt/next/artifacts.tar\nls rip-nuxt/next/\" > deploy.sftp && sftp -i ~/.ssh/i2_rsa -b deploy.sftp $HINT_SSH_USER@$HINT_SSH_HOST"
+    - "echo 'ssh' && ssh -i ~/.ssh/i2_rsa $HINT_SSH_USER@$HINT_SSH_HOST \"source /etc/profile && export no_proxy=\"$no_proxy,gitlab.icade.fr\" && echo \"cd rip-nuxt/next\" && cd rip-nuxt/next && tar -xf artifacts.tar\""
+    - "echo 'ssh' && ssh -i ~/.ssh/i2_rsa $HINT_SSH_USER@$HINT_SSH_HOST \"source /etc/profile && export no_proxy=\"$no_proxy,gitlab.icade.fr\" && echo \"cd rip-nuxt\" && cd rip-nuxt && hintdeploy rip-nuxt switch\""
+
+deploy:integ:
+  extends: .deploy
+  environment:
+    name: integ
+  needs: ["build:project:integ"]
+  except:
+    - merge_requests
+  only:
+    - develop
